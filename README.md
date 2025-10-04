@@ -1,1 +1,1 @@
-# K-pfeldolgoz-s-Arcfelismer-s-2025
+# Kepfeldolgozas-Arcfelismeres-2025
