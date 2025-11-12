@@ -1,5 +1,6 @@
 import cv2
 import sys
+import argparse
 
 
 def convert_to_grayscale(color_image):
@@ -10,9 +11,9 @@ def convert_to_grayscale(color_image):
     return cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
 
 
-def detect_faces_haar(input_path):
+def detect_faces_haar(input_path, output_path):
     """
-    Arcokat detektál Haar Cascade-dal.
+    Arcokat detektál Haar Cascade-dal és elmenti az eredményt.
     """
 
     # Modellek betöltése
@@ -35,32 +36,27 @@ def detect_faces_haar(input_path):
     framed_image = original_image.copy()
     gray_image = convert_to_grayscale(original_image)
 
-    faces_frontal = frontal_face_cascade.detectMultiScale(
-        gray_image,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(30, 30)
-    )
-    faces_profile = profile_face_cascade.detectMultiScale(
-        gray_image,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(30, 30)
-    )
+    faces_frontal = frontal_face_cascade.detectMultiScale(gray_image, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    faces_profile = profile_face_cascade.detectMultiScale(gray_image, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
     all_faces = list(faces_frontal) + list(faces_profile)
     print(f"Találat (Összesen): {len(all_faces)} db.")
 
     for (x, y, w, h) in all_faces:
         cv2.rectangle(framed_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-    cv2.imshow("Original Image", original_image)
-    cv2.imshow("Detected Faces (Haar)", framed_image)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    try:
+        cv2.imwrite(output_path, framed_image)
+        print(f"Eredmény sikeresen mentve: {output_path}")
+    except Exception as e:
+        print(f"Hiba a kimeneti kép mentésekor: {e}")
 
 
 # --- Futtatás ---
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Haar Cascade arcdetektálás GUI-hoz.")
+    parser.add_argument("--input", required=True, help="A bemeneti kép útvonala.")
+    parser.add_argument("--output", required=True, help="A kimeneti kép mentési útvonala.")
 
-input_image_from_project = "project_data/train/image_data/10005.jpg"
-detect_faces_haar(input_image_from_project)
+    args = parser.parse_args()
+
+    detect_faces_haar(args.input, args.output)
