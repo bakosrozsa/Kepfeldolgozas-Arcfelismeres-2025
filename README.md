@@ -1,39 +1,43 @@
-# Arcdetektálás projekt
+# Arcfelismerés és Összehasonlító Elemzés Projekt
 
-Ez a repó egy **Python + OpenCV alapú arcdetektálási projektet** tartalmaz.
+Ez a repó egy **Python + OpenCV alapú arcdetektálási projektet** tartalmaz két különböző algoritmus implementációjával és interaktív GUI alkalmazásokkal.
 A célunk:
 
-* Arcok felismerése képeken
-* Arcok megszámolása
-* Arcok bekeretezése
-* Statisztikák készítése a találati arányról
+* Arcok detektálása képeken két különböző módszerrel (Haar Cascade és DNN)
+* Arcok megszámolása és bekeretezése
+* Algoritmusok teljesítményének összehasonlítása statisztikai módszerekkel
+* Interaktív GUI alkalmazások az eredmények megjelenítéséhez és elemzéséhez
 
 ---
 
-## Funkcionalitás (tervezett)
+## Fájlok és Funkcionalitás
 
-1. **Kép beolvasása**
+### 1. **preprocess_images.py** - Haar Cascade Arcdetektálás
+* OpenCV Haar Cascade osztályozókkal történő arcfelismerés
+* Frontális és profil nézetű arcok detektálása
+* Parancssori eszköz egyetlen kép feldolgozására
 
-   * A program betölti a bemeneti képet.
+### 2. **process_dnn.py** - DNN Alapú Arcdetektálás
+* ResNet-10 SSD DNN modell használata Caffe keretrendszerrel
+* Magabiztossági küszöb alapú szűrés
+* Parancssori eszköz egyetlen kép feldolgozására
 
-2. **Előfeldolgozás**
+### 3. **caffe_ssd_stats.py** - DNN Statisztikai Elemzés
+* DNN algoritmus teljesítményének mérése a teljes train adathalmazon
+* Fejlétszám pontosság, bounding box pontosság számítása
+* Alul- és túlbecslések azonosítása
 
-   * A képet szürkeárnyalatosra alakítjuk, hogy a detektálás gyorsabb és egyszerűbb legyen.
+### 4. **main_window.py** - Egyedi Kép Feldolgozó GUI
+* Interaktív alkalmazás egyetlen kép feldolgozására
+* Algoritmus kiválasztása (Haar Cascade vagy DNN)
+* Bemeneti és kimeneti képek párhuzamos megjelenítése
+* Valós idejű feldolgozási log megjelenítése
 
-3. **Arcok detektálása**
-
-   * OpenCV-vel (pl. Haar Cascade vagy DNN modell) arcokat keresünk a képen.
-   * A talált arcokat bekeretezzük.
-
-4. **Arcok megszámolása**
-
-   * A program megszámolja, hány arcot talált a képen.
-
-5. **Statisztikák kiírása**
-
-   * Egy tesztadatbázison (kb. 8000 kép + csv fájl, amely tartalmazza az elvárt arcok számát) kiértékeljük az algoritmus pontosságát.
-   * A program automatikusan ellenőrzi, hogy a megtalált arcok száma egyezik-e a várt értékkel.
-   * Végül összesített statisztikát ad: hány képnél sikerült pontosan, hány képnél volt alul- vagy túlbecslés.
+### 5. **compare_algorithms.py** - Összehasonlító GUI Alkalmazás
+* Mindkét algoritmus (Haar Cascade és DNN) futtatása a teljes train adathalmazon
+* Valós idejű feldolgozási folyamat megjelenítése
+* Részletes statisztikai összehasonlítás PyQt6 GUI-ban
+* Automatikus elemzés és teljesítmény-összehasonlítás
 
 ---
 
@@ -42,38 +46,87 @@ A célunk:
 A tesztképeket a következő Kaggle datasetből használjuk:
 👉 [Count the number of faces present in an image](https://www.kaggle.com/datasets/vin1234/count-the-number-of-faces-present-in-an-image)
 
-* ~8000 kép
-* CSV fájl, amely minden képhez megadja a valós arcdarabszámot
+* ~8000 kép a train halmazban, ebből ~5700 adatokkal van ellátva
+* CSV fájlok az elvárt arcszámokkal és bounding box koordinátákkal
+* Csak a train.csv-ben szereplő képeket dolgozzuk fel
 
 ---
 
-## Telepítés és futtatás (kezdeti terv)
+## Telepítés és Függőségek
 
-1. Klónozd a repót:
+1. Klónozd a repót és navigálj a könyvtárba:
 
    ```bash
-   git clone https://github.com/felhasznalo/arc-detektalas.git
-   cd arc-detektalas
+   git clone <repository-url>
+   cd Kepfeldolgozas-Arcfelismeres-2025
    ```
 
 2. Telepítsd a függőségeket:
 
    ```bash
-   pip install opencv-python numpy pandas
+   pip install opencv-python numpy pandas PyQt6
    ```
 
-3. Futtatás (példa):
-
-   ```bash
-   python detect_faces.py --input teszt.jpg --output out.jpg --show
-   ```
+3. Győződj meg arról, hogy a pretrained modellek elérhetők:
+   - `pretrained_models/deploy.prototxt`
+   - `pretrained_models/res10_300x300_ssd_iter_140000.caffemodel`
 
 ---
 
-## Fejlesztési terv
+## Használat
+
+### GUI Alkalmazások
+
+**Egyedi kép feldolgozása GUI-ban:**
+```bash
+python main_window.py
+```
+A fő GUI alkalmazás lehetővé teszi:
+- Kép kiválasztását és algoritmus választását (Haar Cascade vagy DNN)
+- Az eredeti kép és a feldolgozott eredmény párhuzamos megjelenítését
+- A talált arcok bekeretezését a kimeneti képen
+- Valós idejű feldolgozási folyamat követését
+
+**Algoritmusok összehasonlítása GUI-ban:**
+```bash
+python compare_algorithms.py
+```
+Az összehasonlító GUI alkalmazás:
+- A projektben található összes algoritmust futtatja a teljes adathalmazon
+- Valós idejű feldolgozási folyamatot mutat
+- Összehasonlító statisztikákat jelenít meg táblázatos formában
+- Automatikus elemzést és teljesítmény-összehasonlítást végez
+- Részletes metrikákat mutat (fejlétszám pontosság, bounding box pontosság, stb.)
+
+### Parancssori Eszközök
+
+**Egyedi kép feldolgozása parancssorból:**
+
+Haar Cascade algoritmussal:
+```bash
+python preprocess_images.py --input image.jpg --output output.jpg
+```
+
+DNN algoritmussal:
+```bash
+python process_dnn.py --input image.jpg --output output.jpg
+```
+
+**Statisztikai elemzés konzolban:**
+```bash
+python caffe_ssd_stats.py
+```
+
+---
+
+## Fejlesztési Állapot
 
 * [x] Projekt inicializálása
-* [ ] Alap arcdetektálás implementálása (kép beolvasása → szürkeárnyalat → arcok detektálása)
-* [ ] Arcok bekeretezése és megszámolása
-* [ ] Tesztadatbázis betöltése és kiértékelés
-* [ ] Pontossági statisztikák előállítása
+* [x] Haar Cascade arcdetektálás implementálása
+* [x] DNN alapú arcdetektálás implementálása
+* [x] Tesztadatbázis integrálása
+* [x] Statisztikai elemzés megvalósítása
+* [x] Egyedi kép feldolgozó GUI alkalmazás (main_window.py)
+* [x] Összehasonlító GUI alkalmazás (compare_algorithms.py)
+* [x] Algoritmusok összehasonlító elemzése
+* [ ] További saját modell tesztelése (tervezett)
