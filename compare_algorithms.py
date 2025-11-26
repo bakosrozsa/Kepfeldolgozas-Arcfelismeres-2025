@@ -7,8 +7,9 @@ import argparse
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
                              QTextEdit, QPushButton, QProgressBar, QSplitter)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
+import threading
 
 # -- Modell beállítások --
 PROTOTXT_PATH = "pretrained_models/deploy.prototxt"
@@ -139,9 +140,15 @@ def calculate_bbox_accuracy(detected_faces, bbox_rows):
 class ProcessingThread(QThread):
     progress_updated = pyqtSignal(int, str)
     processing_finished = pyqtSignal(dict, dict)
+    stats_updated = pyqtSignal(dict, dict)  # Új signal a részleges eredményekhez
 
     def __init__(self):
         super().__init__()
+        self.paused = False
+        self.stopped = False
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # Kezdetben nem paused
+
         self.stats_haar = {
             'total_images': 0,
             'headcount_matches': 0,
@@ -182,6 +189,12 @@ class ProcessingThread(QThread):
 
         # --- PROCESS IMAGES ---
         for idx, img_name in enumerate(image_files, start=1):
+            # Szüneteltetés ellenőrzése
+            self.pause_event.wait()
+
+            if self.stopped:
+                break
+
             # --- CHECK IF IMAGE IS IN HEADCOUNT CSV ---
             headcount_row = headcount_df[headcount_df['Name'] == img_name]
             if headcount_row.empty:
@@ -237,7 +250,25 @@ class ProcessingThread(QThread):
             progress = int(idx / total_files * 100)
             self.progress_updated.emit(progress, f"Processing image {self.stats_haar['total_images']}/{len([f for f in image_files if f in headcount_df['Name'].values])} ({img_name}) - Haar: {len(faces_haar)}, DNN: {len(faces_dnn)}")
 
+            # Részleges eredmények küldése minden kép után
+            self.stats_updated.emit(self.stats_haar.copy(), self.stats_dnn.copy())
+
         self.processing_finished.emit(self.stats_haar, self.stats_dnn)
+
+    def pause(self):
+        """Szünetelteti a feldolgozást"""
+        self.paused = True
+        self.pause_event.clear()
+
+    def resume(self):
+        """Folytatja a feldolgozást"""
+        self.paused = False
+        self.pause_event.set()
+
+    def stop(self):
+        """Leállítja a feldolgozást"""
+        self.stopped = True
+        self.resume()  # Biztosítjuk hogy ne maradjon paused állapotban
 
 
 class ComparisonWindow(QMainWindow):
@@ -250,14 +281,20 @@ class ComparisonWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
 
-        # Progress bar and start button
+        # Progress bar and control buttons
         control_layout = QHBoxLayout()
         self.start_button = QPushButton("Feldolgozás Indítása")
         self.start_button.clicked.connect(self.start_processing)
+
+        self.pause_button = QPushButton("Szüneteltetés")
+        self.pause_button.clicked.connect(self.toggle_pause)
+        self.pause_button.setEnabled(False)
+
         self.progress_bar = QProgressBar()
         self.progress_label = QLabel("Készen áll a feldolgozásra...")
 
         control_layout.addWidget(self.start_button)
+        control_layout.addWidget(self.pause_button)
         control_layout.addWidget(self.progress_bar)
         control_layout.addWidget(self.progress_label)
 
@@ -299,18 +336,61 @@ class ComparisonWindow(QMainWindow):
         self.processing_thread = ProcessingThread()
         self.processing_thread.progress_updated.connect(self.update_progress)
         self.processing_thread.processing_finished.connect(self.display_results)
+        self.processing_thread.stats_updated.connect(self.update_partial_results)
+
+        self.is_processing = False
+        self.is_paused = False
 
     def start_processing(self):
-        self.start_button.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.processing_thread.start()
+        if not self.is_processing:
+            # Új feldolgozás indítása
+            self.is_processing = True
+            self.is_paused = False
+            self.start_button.setText("Leállítás")
+            self.pause_button.setEnabled(True)
+            self.pause_button.setText("Szüneteltetés")
+            self.progress_bar.setValue(0)
+            self.processing_thread.start()
+        else:
+            # Feldolgozás leállítása
+            self.processing_thread.stop()
+            self.is_processing = False
+            self.start_button.setText("Feldolgozás Indítása")
+            self.start_button.setEnabled(True)
+            self.pause_button.setEnabled(False)
+            self.progress_label.setText("Feldolgozás leállítva")
 
     def update_progress(self, value, message):
         self.progress_bar.setValue(value)
         self.progress_label.setText(message)
 
+    def toggle_pause(self):
+        if self.is_paused:
+            # Folytatás
+            self.processing_thread.resume()
+            self.is_paused = False
+            self.pause_button.setText("Szüneteltetés")
+            self.progress_label.setText("Feldolgozás folytatódik...")
+        else:
+            # Szüneteltetés
+            self.processing_thread.pause()
+            self.is_paused = True
+            self.pause_button.setText("Folytatás")
+            self.progress_label.setText("Feldolgozás szünetelve - eredmények frissítve")
+
+    def update_partial_results(self, stats_haar, stats_dnn):
+        """Részleges eredmények frissítése szüneteltetéskor"""
+        if self.is_paused:
+            # Display current results
+            self.display_stats_in_table(self.haar_table, stats_haar, "Haar Cascade")
+            self.display_stats_in_table(self.dnn_table, stats_dnn, "DNN")
+            self.generate_comparison(stats_haar, stats_dnn)
+
     def display_results(self, stats_haar, stats_dnn):
+        self.is_processing = False
+        self.start_button.setText("Feldolgozás Indítása")
         self.start_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
         self.progress_label.setText("Feldolgozás befejezve!")
 
         # Display Haar results
