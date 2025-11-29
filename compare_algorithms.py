@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 import sys
 import argparse
+import torch
+import torch.nn as nn
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
                              QTextEdit, QPushButton, QProgressBar, QSplitter)
@@ -14,6 +16,8 @@ import threading
 # -- Modell beállítások --
 PROTOTXT_PATH = "pretrained_models/deploy.prototxt"
 MODEL_PATH = "pretrained_models/res10_300x300_ssd_iter_140000.caffemodel"
+YUNET_MODEL_PATH = "pretrained_models/face_detection_yunet_2023mar.onnx"
+CNN_MODEL_PATH = "models/face_count_bbox_cnn.pth"
 CONFIDENCE_THRESHOLD = 0.5
 
 # --- CONFIG ---
@@ -21,6 +25,10 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'project_data
 IMAGE_DIR = os.path.join(BASE_DIR, 'image_data')
 CSV_HEADCOUNT = os.path.join(BASE_DIR, 'train.csv')
 CSV_BBOX = os.path.join(BASE_DIR, 'bbox_train.csv')
+
+# CNN model constants
+IMG_SIZE = (300, 300)
+MAX_FACES = 10
 
 
 def convert_to_grayscale(color_image):
@@ -105,6 +113,117 @@ def detect_faces_dnn(image):
     return detected_faces, framed_image
 
 
+def detect_faces_yunet(image):
+    """
+    Arcokat detektál YuNet modellel egy képen.
+    Visszatér: (arcok listája, feldolgozott kép)
+    """
+
+    framed_image = image.copy()
+    height, width, _ = image.shape
+
+    # --Detektor létrehozása--
+    try:
+        detector = cv2.FaceDetectorYN.create(
+            model=YUNET_MODEL_PATH,
+            config="",
+            input_size=(width, height),
+            score_threshold=0.5,
+            nms_threshold=0.3,
+            top_k=5000
+        )
+    except Exception as e:
+        print("Hiba a YuNet modell betöltésekor!")
+        print(f"Részletes hiba: {e}")
+        return [], image
+
+    # --Detektálás futtatása--
+    _, faces = detector.detect(image)
+
+    detected_faces = []
+
+    # --Eredmények feldolgozása--
+    if faces is not None:
+        for face in faces:
+            box = face[0:4].astype(np.int32)
+            x, y, w, h = box[0], box[1], box[2], box[3]
+            startX, startY, endX, endY = x, y, x + w, y + h
+            detected_faces.append((startX, startY, endX, endY))
+            cv2.rectangle(framed_image, (startX, startY), (endX, endY), (0, 255, 0), 2)
+
+    return detected_faces, framed_image
+
+
+class FaceCNN(nn.Module):
+    def __init__(self, max_faces=MAX_FACES):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1,1))
+        )
+        self.out = nn.Linear(64, 1 + 4 * max_faces)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        return self.out(x)
+
+
+def detect_faces_cnn(image):
+    """
+    Arcokat detektál saját CNN modellel egy képen.
+    Visszatér: (arcok listája, feldolgozott kép)
+    """
+
+    try:
+        model = FaceCNN()
+        model.load_state_dict(torch.load(CNN_MODEL_PATH, map_location="cpu"))
+        model.eval()
+    except Exception as e:
+        print(f"Hiba a CNN modell betöltésekor: {e}")
+        return [], image
+
+    framed_image = image.copy()
+    orig_h, orig_w = image.shape[:2]
+
+    # Kép előkészítése
+    img_resized = cv2.resize(image, IMG_SIZE)
+    img_resized = img_resized.astype(np.float32)
+    img_resized -= np.array([104.0, 177.0, 123.0])
+    img_resized = img_resized.transpose(2, 0, 1)
+
+    tensor = torch.tensor(img_resized, dtype=torch.float32).unsqueeze(0)
+
+    # Inferencia
+    with torch.no_grad():
+        pred = model(tensor)[0].cpu().numpy()
+
+    count_norm = pred[0]
+    predicted_count = int(round(count_norm * MAX_FACES))
+
+    box_values = pred[1:]
+    boxes = box_values.reshape(MAX_FACES, 4)
+    boxes = boxes[:predicted_count]
+
+    detected_faces = []
+
+    # Bounding boxok visszaalakítása eredeti méretre
+    for box in boxes:
+        x1, y1, x2, y2 = box
+        x1 = int(x1 * orig_w)
+        y1 = int(y1 * orig_h)
+        x2 = int(x2 * orig_w)
+        y2 = int(y2 * orig_h)
+        detected_faces.append((x1, y1, x2, y2))
+        cv2.rectangle(framed_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+    return detected_faces, framed_image
+
+
 def calculate_bbox_accuracy(detected_faces, bbox_rows):
     """
     Kiszámítja a bounding box pontosságot.
@@ -139,8 +258,8 @@ def calculate_bbox_accuracy(detected_faces, bbox_rows):
 
 class ProcessingThread(QThread):
     progress_updated = pyqtSignal(int, str)
-    processing_finished = pyqtSignal(dict, dict)
-    stats_updated = pyqtSignal(dict, dict)  # Új signal a részleges eredményekhez
+    processing_finished = pyqtSignal(dict, dict, dict, dict)
+    stats_updated = pyqtSignal(dict, dict, dict, dict)  # Új signal a részleges eredményekhez
 
     def __init__(self):
         super().__init__()
@@ -160,6 +279,26 @@ class ProcessingThread(QThread):
         }
 
         self.stats_dnn = {
+            'total_images': 0,
+            'headcount_matches': 0,
+            'face_boxes_correct': 0,
+            'total_faces': 0,
+            'total_bboxes': 0,
+            'under_detected': [],
+            'over_detected': []
+        }
+
+        self.stats_yunet = {
+            'total_images': 0,
+            'headcount_matches': 0,
+            'face_boxes_correct': 0,
+            'total_faces': 0,
+            'total_bboxes': 0,
+            'under_detected': [],
+            'over_detected': []
+        }
+
+        self.stats_cnn = {
             'total_images': 0,
             'headcount_matches': 0,
             'face_boxes_correct': 0,
@@ -209,6 +348,8 @@ class ProcessingThread(QThread):
 
             self.stats_haar['total_images'] += 1
             self.stats_dnn['total_images'] += 1
+            self.stats_yunet['total_images'] += 1
+            self.stats_cnn['total_images'] += 1
             true_headcount = int(headcount_row['HeadCount'].values[0])
 
             # --- DETECT FACES WITH HAAR ---
@@ -218,6 +359,14 @@ class ProcessingThread(QThread):
             # --- DETECT FACES WITH DNN ---
             faces_dnn, _ = detect_faces_dnn(image)
             self.stats_dnn['total_faces'] += len(faces_dnn)
+
+            # --- DETECT FACES WITH YUNET ---
+            faces_yunet, _ = detect_faces_yunet(image)
+            self.stats_yunet['total_faces'] += len(faces_yunet)
+
+            # --- DETECT FACES WITH CNN ---
+            faces_cnn, _ = detect_faces_cnn(image)
+            self.stats_cnn['total_faces'] += len(faces_cnn)
 
             # --- STATISTICS FOR HAAR ---
             if len(faces_haar) == true_headcount:
@@ -235,6 +384,22 @@ class ProcessingThread(QThread):
             else:
                 self.stats_dnn['over_detected'].append(img_name)
 
+            # --- STATISTICS FOR YUNET ---
+            if len(faces_yunet) == true_headcount:
+                self.stats_yunet['headcount_matches'] += 1
+            elif len(faces_yunet) < true_headcount:
+                self.stats_yunet['under_detected'].append(img_name)
+            else:
+                self.stats_yunet['over_detected'].append(img_name)
+
+            # --- STATISTICS FOR CNN ---
+            if len(faces_cnn) == true_headcount:
+                self.stats_cnn['headcount_matches'] += 1
+            elif len(faces_cnn) < true_headcount:
+                self.stats_cnn['under_detected'].append(img_name)
+            else:
+                self.stats_cnn['over_detected'].append(img_name)
+
             # --- BBOX ACCURACY ---
             bbox_rows = bbox_df[bbox_df['Name'] == img_name]
 
@@ -246,14 +411,22 @@ class ProcessingThread(QThread):
             self.stats_dnn['face_boxes_correct'] += correct_dnn
             self.stats_dnn['total_bboxes'] += total_bbox_dnn
 
+            correct_yunet, total_bbox_yunet = calculate_bbox_accuracy(faces_yunet, bbox_rows)
+            self.stats_yunet['face_boxes_correct'] += correct_yunet
+            self.stats_yunet['total_bboxes'] += total_bbox_yunet
+
+            correct_cnn, total_bbox_cnn = calculate_bbox_accuracy(faces_cnn, bbox_rows)
+            self.stats_cnn['face_boxes_correct'] += correct_cnn
+            self.stats_cnn['total_bboxes'] += total_bbox_cnn
+
             # --- PROGRESS ---
             progress = int(idx / total_files * 100)
-            self.progress_updated.emit(progress, f"Processing image {self.stats_haar['total_images']}/{len([f for f in image_files if f in headcount_df['Name'].values])} ({img_name}) - Haar: {len(faces_haar)}, DNN: {len(faces_dnn)}")
+            self.progress_updated.emit(progress, f"Processing image {self.stats_haar['total_images']}/{len([f for f in image_files if f in headcount_df['Name'].values])} ({img_name}) - Haar: {len(faces_haar)}, DNN: {len(faces_dnn)}, YuNet: {len(faces_yunet)}, CNN: {len(faces_cnn)}")
 
             # Részleges eredmények küldése minden kép után
-            self.stats_updated.emit(self.stats_haar.copy(), self.stats_dnn.copy())
+            self.stats_updated.emit(self.stats_haar.copy(), self.stats_dnn.copy(), self.stats_yunet.copy(), self.stats_cnn.copy())
 
-        self.processing_finished.emit(self.stats_haar, self.stats_dnn)
+        self.processing_finished.emit(self.stats_haar, self.stats_dnn, self.stats_yunet, self.stats_cnn)
 
     def pause(self):
         """Szünetelteti a feldolgozást"""
@@ -300,8 +473,11 @@ class ComparisonWindow(QMainWindow):
 
         layout.addLayout(control_layout)
 
-        # Create splitter for results
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # Create splitter for results - 2x2 grid
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left side splitter (Haar and DNN)
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
 
         # Haar Cascade results
         haar_widget = QWidget()
@@ -312,7 +488,7 @@ class ComparisonWindow(QMainWindow):
         self.haar_table.setHorizontalHeaderLabels(["Metrika", "Érték"])
         self.haar_table.horizontalHeader().setStretchLastSection(True)
         haar_layout.addWidget(self.haar_table)
-        splitter.addWidget(haar_widget)
+        left_splitter.addWidget(haar_widget)
 
         # DNN results
         dnn_widget = QWidget()
@@ -323,9 +499,38 @@ class ComparisonWindow(QMainWindow):
         self.dnn_table.setHorizontalHeaderLabels(["Metrika", "Érték"])
         self.dnn_table.horizontalHeader().setStretchLastSection(True)
         dnn_layout.addWidget(self.dnn_table)
-        splitter.addWidget(dnn_widget)
+        left_splitter.addWidget(dnn_widget)
 
-        layout.addWidget(splitter)
+        main_splitter.addWidget(left_splitter)
+
+        # Right side splitter (YuNet and CNN)
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # YuNet results
+        yunet_widget = QWidget()
+        yunet_layout = QVBoxLayout(yunet_widget)
+        yunet_layout.addWidget(QLabel("YuNet Eredmények"))
+        self.yunet_table = QTableWidget()
+        self.yunet_table.setColumnCount(2)
+        self.yunet_table.setHorizontalHeaderLabels(["Metrika", "Érték"])
+        self.yunet_table.horizontalHeader().setStretchLastSection(True)
+        yunet_layout.addWidget(self.yunet_table)
+        right_splitter.addWidget(yunet_widget)
+
+        # CNN results
+        cnn_widget = QWidget()
+        cnn_layout = QVBoxLayout(cnn_widget)
+        cnn_layout.addWidget(QLabel("CNN Eredmények"))
+        self.cnn_table = QTableWidget()
+        self.cnn_table.setColumnCount(2)
+        self.cnn_table.setHorizontalHeaderLabels(["Metrika", "Érték"])
+        self.cnn_table.horizontalHeader().setStretchLastSection(True)
+        cnn_layout.addWidget(self.cnn_table)
+        right_splitter.addWidget(cnn_widget)
+
+        main_splitter.addWidget(right_splitter)
+
+        layout.addWidget(main_splitter)
 
         # Comparison text area
         layout.addWidget(QLabel("Összehasonlítás és Elemzés"))
@@ -378,29 +583,31 @@ class ComparisonWindow(QMainWindow):
             self.pause_button.setText("Folytatás")
             self.progress_label.setText("Feldolgozás szünetelve - eredmények frissítve")
 
-    def update_partial_results(self, stats_haar, stats_dnn):
+    def update_partial_results(self, stats_haar, stats_dnn, stats_yunet, stats_cnn):
         """Részleges eredmények frissítése szüneteltetéskor"""
         if self.is_paused:
             # Display current results
             self.display_stats_in_table(self.haar_table, stats_haar, "Haar Cascade")
             self.display_stats_in_table(self.dnn_table, stats_dnn, "DNN")
-            self.generate_comparison(stats_haar, stats_dnn)
+            self.display_stats_in_table(self.yunet_table, stats_yunet, "YuNet")
+            self.display_stats_in_table(self.cnn_table, stats_cnn, "CNN")
+            self.generate_comparison(stats_haar, stats_dnn, stats_yunet, stats_cnn)
 
-    def display_results(self, stats_haar, stats_dnn):
+    def display_results(self, stats_haar, stats_dnn, stats_yunet, stats_cnn):
         self.is_processing = False
         self.start_button.setText("Feldolgozás Indítása")
         self.start_button.setEnabled(True)
         self.pause_button.setEnabled(False)
         self.progress_label.setText("Feldolgozás befejezve!")
 
-        # Display Haar results
+        # Display results for all algorithms
         self.display_stats_in_table(self.haar_table, stats_haar, "Haar Cascade")
-
-        # Display DNN results
         self.display_stats_in_table(self.dnn_table, stats_dnn, "DNN")
+        self.display_stats_in_table(self.yunet_table, stats_yunet, "YuNet")
+        self.display_stats_in_table(self.cnn_table, stats_cnn, "CNN")
 
         # Generate comparison
-        self.generate_comparison(stats_haar, stats_dnn)
+        self.generate_comparison(stats_haar, stats_dnn, stats_yunet, stats_cnn)
 
     def display_stats_in_table(self, table, stats, algorithm_name):
         table.setRowCount(0)
@@ -432,7 +639,7 @@ class ComparisonWindow(QMainWindow):
 
         table.resizeColumnsToContents()
 
-    def generate_comparison(self, stats_haar, stats_dnn):
+    def generate_comparison(self, stats_haar, stats_dnn, stats_yunet, stats_cnn):
         comparison_text = "<h2>Algoritmusok Összehasonlítása</h2>"
 
         total_images = stats_haar['total_images']
@@ -440,40 +647,60 @@ class ComparisonWindow(QMainWindow):
         if total_images > 0:
             haar_headcount_acc = stats_haar['headcount_matches'] / total_images * 100
             dnn_headcount_acc = stats_dnn['headcount_matches'] / total_images * 100
+            yunet_headcount_acc = stats_yunet['headcount_matches'] / total_images * 100
+            cnn_headcount_acc = stats_cnn['headcount_matches'] / total_images * 100
 
             comparison_text += f"<h3>Fejlétszám Pontosság</h3>"
             comparison_text += f"<p>Haar Cascade: {haar_headcount_acc:.2f}%</p>"
             comparison_text += f"<p>DNN: {dnn_headcount_acc:.2f}%</p>"
+            comparison_text += f"<p>YuNet: {yunet_headcount_acc:.2f}%</p>"
+            comparison_text += f"<p>CNN: {cnn_headcount_acc:.2f}%</p>"
 
-            if dnn_headcount_acc > haar_headcount_acc:
-                comparison_text += f"<p><b>A DNN algoritmus pontosabb fejlétszám becslésben ({dnn_headcount_acc - haar_headcount_acc:.2f}% különbség).</b></p>"
-            elif haar_headcount_acc > dnn_headcount_acc:
-                comparison_text += f"<p><b>A Haar Cascade algoritmus pontosabb fejlétszám becslésben ({haar_headcount_acc - dnn_headcount_acc:.2f}% különbség).</b></p>"
-            else:
-                comparison_text += f"<p><b>A két algoritmus fejlétszám pontossága azonos.</b></p>"
+            # Find best algorithm for headcount
+            accuracies = {
+                'Haar Cascade': haar_headcount_acc,
+                'DNN': dnn_headcount_acc,
+                'YuNet': yunet_headcount_acc,
+                'CNN': cnn_headcount_acc
+            }
+            best_algo = max(accuracies, key=accuracies.get)
+            best_acc = accuracies[best_algo]
+            comparison_text += f"<p><b>A {best_algo} algoritmus a legpontosabb fejlétszám becslésben ({best_acc:.2f}%).</b></p>"
 
-        if stats_haar['total_bboxes'] > 0 and stats_dnn['total_bboxes'] > 0:
+        if stats_haar['total_bboxes'] > 0 and stats_dnn['total_bboxes'] > 0 and stats_yunet['total_bboxes'] > 0 and stats_cnn['total_bboxes'] > 0:
             haar_bbox_acc = stats_haar['face_boxes_correct'] / stats_haar['total_bboxes'] * 100
             dnn_bbox_acc = stats_dnn['face_boxes_correct'] / stats_dnn['total_bboxes'] * 100
+            yunet_bbox_acc = stats_yunet['face_boxes_correct'] / stats_yunet['total_bboxes'] * 100
+            cnn_bbox_acc = stats_cnn['face_boxes_correct'] / stats_cnn['total_bboxes'] * 100
 
             comparison_text += f"<h3>Bounding Box Pontosság</h3>"
             comparison_text += f"<p>Haar Cascade: {haar_bbox_acc:.2f}%</p>"
             comparison_text += f"<p>DNN: {dnn_bbox_acc:.2f}%</p>"
+            comparison_text += f"<p>YuNet: {yunet_bbox_acc:.2f}%</p>"
+            comparison_text += f"<p>CNN: {cnn_bbox_acc:.2f}%</p>"
 
-            if dnn_bbox_acc > haar_bbox_acc:
-                comparison_text += f"<p><b>A DNN algoritmus pontosabb bounding box detektálásban ({dnn_bbox_acc - haar_bbox_acc:.2f}% különbség).</b></p>"
-            elif haar_bbox_acc > dnn_bbox_acc:
-                comparison_text += f"<p><b>A Haar Cascade algoritmus pontosabb bounding box detektálásban ({haar_bbox_acc - dnn_bbox_acc:.2f}% különbség).</b></p>"
-            else:
-                comparison_text += f"<p><b>A két algoritmus bounding box pontossága azonos.</b></p>"
+            # Find best algorithm for bbox
+            bbox_accuracies = {
+                'Haar Cascade': haar_bbox_acc,
+                'DNN': dnn_bbox_acc,
+                'YuNet': yunet_bbox_acc,
+                'CNN': cnn_bbox_acc
+            }
+            best_bbox_algo = max(bbox_accuracies, key=bbox_accuracies.get)
+            best_bbox_acc = bbox_accuracies[best_bbox_algo]
+            comparison_text += f"<p><b>A {best_bbox_algo} algoritmus a legpontosabb bounding box detektálásban ({best_bbox_acc:.2f}%).</b></p>"
 
         comparison_text += f"<h3>Detektált Arcok Száma</h3>"
         comparison_text += f"<p>Haar Cascade: {stats_haar['total_faces']} arc</p>"
         comparison_text += f"<p>DNN: {stats_dnn['total_faces']} arc</p>"
+        comparison_text += f"<p>YuNet: {stats_yunet['total_faces']} arc</p>"
+        comparison_text += f"<p>CNN: {stats_cnn['total_faces']} arc</p>"
 
         comparison_text += f"<h3>Hibák</h3>"
         comparison_text += f"<p>Haar Cascade - Túl kevés: {len(stats_haar['under_detected'])}, Túl sok: {len(stats_haar['over_detected'])}</p>"
         comparison_text += f"<p>DNN - Túl kevés: {len(stats_dnn['under_detected'])}, Túl sok: {len(stats_dnn['over_detected'])}</p>"
+        comparison_text += f"<p>YuNet - Túl kevés: {len(stats_yunet['under_detected'])}, Túl sok: {len(stats_yunet['over_detected'])}</p>"
+        comparison_text += f"<p>CNN - Túl kevés: {len(stats_cnn['under_detected'])}, Túl sok: {len(stats_cnn['over_detected'])}</p>"
 
         self.comparison_text.setHtml(comparison_text)
 
