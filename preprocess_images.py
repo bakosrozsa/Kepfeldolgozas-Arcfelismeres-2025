@@ -36,10 +36,9 @@ def detect_faces_haar(input_path, output_path):
     framed_image = original_image.copy()
     gray_image = convert_to_grayscale(original_image)
 
-    faces_frontal = frontal_face_cascade.detectMultiScale(gray_image, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    faces_profile = profile_face_cascade.detectMultiScale(gray_image, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    faces_frontal = frontal_face_cascade.detectMultiScale(gray_image, scaleFactor=1.028, minNeighbors=7, minSize=(30, 30))
 
-    all_faces = list(faces_frontal) + list(faces_profile)
+    all_faces = list(faces_frontal)
     print(f"Találat (Összesen): {len(all_faces)} db.")
 
     for (x, y, w, h) in all_faces:
